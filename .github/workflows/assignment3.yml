@@ -1,0 +1,140 @@
+name: assignment3
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and load the books service image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./books
+          tags: books-service:latest
+          outputs: type=docker,dest=/tmp/image.tar
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: books-service
+          path: /tmp/image.tar
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: books-service
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/image.tar
+
+      - name: Clean up any existing MongoDB containers
+        run: |
+          docker ps -q --filter "ancestor=mongo" | xargs -r docker stop
+          docker ps -a -q --filter "ancestor=mongo" | xargs -r docker rm
+
+      - name: Wait for MongoDB to be ready
+        run: sleep 30
+
+      - name: Run docker-compose up
+        run: docker-compose up --build -d
+
+      - name: Run tests with pytest
+        run: |
+          cd tests
+          pytest -v assn3_tests.py > ../assn3_test_results.txt
+        continue-on-error: true
+
+      - name: Save test results to log.txt
+        run: |
+          if grep -q "tests failed" ../assn3_test_results.txt; then
+            echo "tests failed" >> ../log.txt
+          else
+            echo "tests succeeded" >> ../log.txt
+          fi
+        id: test
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        with:
+          name: assn3_test_results
+          path: assn3_test_results.txt
+
+  query:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: books-service
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/image.tar
+
+      - name: Clean up any existing MongoDB containers
+        run: |
+          docker ps -q --filter "ancestor=mongo" | xargs -r docker stop
+          docker ps -a -q --filter "ancestor=mongo" | xargs -r docker rm
+
+      - name: Wait for MongoDB to be ready
+        run: sleep 30
+
+      - name: Run docker-compose up
+        run: docker-compose up --build -d
+
+      - name: Create books with POST requests
+        run: |
+          curl -X POST -H "Content-Type: application/json" -d '{"title":"Adventures of Huckleberry Finn", "ISBN":"9780520343641", "genre":"Fiction"}' http://localhost:5001/books
+          curl -X POST -H "Content-Type: application/json" -d '{"title":"The Best of Isaac Asimov", "ISBN":"9780385050784", "genre":"Science Fiction"}' http://localhost:5001/books
+          curl -X POST -H "Content-Type: application/json" -d '{"title":"Fear No Evil", "ISBN":"9780394558783", "genre":"Biography"}' http://localhost:5001/books
+          curl -X POST -H "Content-Type: application/json" -d '{"title":"The Adventures of Tom Sawyer", "ISBN":"9780195810400", "genre":"Fiction"}' http://localhost:5001/books
+          curl -X POST -H "Content-Type: application/json" -d '{"title":"I, Robot", "ISBN":"9780553294385", "genre":"Science Fiction"}' http://localhost:5001/books
+          curl -X POST -H "Content-Type: application/json" -d '{"title":"Second Foundation", "ISBN":"9780553293364", "genre":"Science Fiction"}' http://localhost:5001/books
+
+      - name: Execute specific requests and record the results
+        run: |
+          cd tests
+          echo "Running queries from query.txt"
+          touch response.txt
+          while IFS= read -r line; do
+            query_string="${line}"
+            response=$(curl -s "http://localhost:5001/books${query_string}")
+            status_code=$(curl -o /dev/null -s -w "%{http_code}\n" "http://localhost:5001/books${query_string}")
+            if [ "$status_code" -eq 200 ]; then
+              echo "query: ${query_string}" >> ../response.txt
+              echo "response: ${response}" >> ../response.txt
+            else
+              echo "query: ${query_string}" >> ../response.txt
+              echo "response: error ${status_code}" >> ../response.txt
+            fi
+          done < ../query.txt
+
+      - name: Upload response file
+        uses: actions/upload-artifact@v3
+        with:
+          name: response
+          path: response.txt
+
+      - name: Upload log file
+        uses: actions/upload-artifact@v3
+        with:
+          name: log
+          path: log.txt
